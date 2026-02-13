@@ -50,6 +50,9 @@ pub enum TabContent {
         recipient: String,
         status: String,
     },
+    HydraPanel {
+        new_peer_address: String,
+    },
     Blank,
 }
 

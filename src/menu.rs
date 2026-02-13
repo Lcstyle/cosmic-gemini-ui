@@ -14,6 +14,7 @@ pub enum MenuActionItem {
     Reload,
     Bookmark,
     IdentityManager,
+    HydraPanel,
     FocusUrlBar,
 }
 
@@ -29,6 +30,7 @@ impl MenuAction for MenuActionItem {
             MenuActionItem::Reload => AppMessage::Reload,
             MenuActionItem::Bookmark => AppMessage::ToggleBookmark,
             MenuActionItem::IdentityManager => AppMessage::ShowIdentityManager,
+            MenuActionItem::HydraPanel => AppMessage::ShowHydraPanel,
             MenuActionItem::FocusUrlBar => AppMessage::FocusUrlBar,
         }
     }

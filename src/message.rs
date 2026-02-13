@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use cosmic::widget::segmented_button;
 
 #[derive(Debug, Clone)]
@@ -86,6 +88,21 @@ pub enum AppMessage {
     // Session persistence
     SaveSession,
     SessionLoaded(gemini_core::session::SessionData),
+
+    // HYDRA protocol
+    HydraNodeStarted(Option<Arc<hydra_core::node::HydraHandle>>),
+    HydraStatusUpdate(hydra_core::node::HydraStatus),
+    HydraAlert(hydra_core::alert::AlertResult),
+    HydraObservationRecorded(String),
+    HydraSyncComplete { peer_id: String, events_exchanged: usize },
+    HydraError(String),
+    ShowHydraPanel,
+    HydraToggleEnabled,
+    HydraAddPeer(String),
+    HydraRemovePeer(String),
+    HydraManualSync,
+    HydraDismissAlert(usize),
+    HydraPeerAddressChanged(String),
 
     // Internal
     NoOp,

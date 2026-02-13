@@ -6,3 +6,4 @@ pub mod download_view;
 pub mod identity_view;
 pub mod titan_view;
 pub mod misfin_view;
+pub mod hydra_view;

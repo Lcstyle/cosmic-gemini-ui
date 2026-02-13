@@ -8,6 +8,8 @@ pub struct AppModel {
     pub active_tab: usize,
     pub url_bar_text: String,
     pub url_bar_focused: bool,
+    pub hydra_status: Option<hydra_core::node::HydraStatus>,
+    pub hydra_alerts: Vec<hydra_core::alert::AlertResult>,
 }
 
 impl AppModel {
@@ -17,6 +19,8 @@ impl AppModel {
             active_tab: 0,
             url_bar_text: String::new(),
             url_bar_focused: true,
+            hydra_status: None,
+            hydra_alerts: Vec::new(),
         }
     }
 

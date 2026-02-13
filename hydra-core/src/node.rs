@@ -55,6 +55,7 @@ pub struct HydraStatus {
 }
 
 /// Handle to a running HydraNode — used by the app to send commands.
+#[derive(Debug)]
 pub struct HydraHandle {
     pub cmd_tx: mpsc::Sender<HydraCommand>,
     pub join_handle: tokio::task::JoinHandle<()>,

@@ -1,4 +1,5 @@
 use cosmic::{Action, Task};
+use tokio::sync::broadcast;
 use url::Url;
 
 use crate::app::App;
@@ -170,6 +171,7 @@ fn urlencoding_encode(s: &str) -> String {
 
 /// Handle an AppMessage and return a Task.
 pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
+    let cert_obs = app.cert_observer_tx.clone();
     match message {
         AppMessage::Navigate(input) => {
             let url = normalize_url(input);
@@ -204,7 +206,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
             }
 
             app.model.active_tab_mut().content = TabContent::Loading;
-            return spawn_fetch(url);
+            return spawn_fetch(url, cert_obs.clone());
         }
 
         AppMessage::LinkClicked(href) => {
@@ -231,7 +233,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
             app.model.url_bar_text = resolved.clone();
             app.model.active_tab_mut().url = resolved.clone();
             app.model.active_tab_mut().content = TabContent::Loading;
-            return spawn_fetch(resolved);
+            return spawn_fetch(resolved, cert_obs.clone());
         }
 
         AppMessage::GoHome => {
@@ -252,7 +254,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                     app.model.active_tab_mut().title = entry.title;
                 } else {
                     app.model.active_tab_mut().content = TabContent::Loading;
-                    return spawn_fetch(entry.url);
+                    return spawn_fetch(entry.url, cert_obs.clone());
                 }
             }
         }
@@ -267,7 +269,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                     app.model.active_tab_mut().title = entry.title;
                 } else {
                     app.model.active_tab_mut().content = TabContent::Loading;
-                    return spawn_fetch(entry.url);
+                    return spawn_fetch(entry.url, cert_obs.clone());
                 }
             }
         }
@@ -276,7 +278,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
             let url = app.model.active_tab().url.clone();
             if !url.is_empty() {
                 app.model.active_tab_mut().content = TabContent::Loading;
-                return spawn_fetch(url);
+                return spawn_fetch(url, cert_obs.clone());
             }
         }
 
@@ -296,7 +298,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                 app.model.active_tab_mut().url = url.clone();
                 app.model.active_tab_mut().content = TabContent::Loading;
                 app.rebuild_tab_model();
-                return spawn_fetch(url);
+                return spawn_fetch(url, cert_obs.clone());
             }
             load_bookmarks_into_active_tab(app);
             app.rebuild_tab_model();
@@ -415,7 +417,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                                 // Spawn async image fetches for inline images
                                 if app.config.auto_load_images {
                                     let tab_index = app.model.active_tab;
-                                    let image_tasks = spawn_image_fetches(tab_index, app);
+                                    let image_tasks = spawn_image_fetches(tab_index, app, cert_obs.clone());
                                     if !image_tasks.is_empty() {
                                         return Task::batch(image_tasks);
                                     }
@@ -440,11 +442,11 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                                     if let Some(bound_id) =
                                         gemini_core::identity::get_host_binding(host)
                                     {
-                                        return spawn_fetch_with_identity(resolved, bound_id);
+                                        return spawn_fetch_with_identity(resolved, bound_id, cert_obs.clone());
                                     }
                                 }
                             }
-                            return spawn_fetch(resolved);
+                            return spawn_fetch(resolved, cert_obs.clone());
                         }
                         PageStatus::TempFail | PageStatus::PermFail => {
                             app.model.active_tab_mut().content = TabContent::Error(
@@ -457,7 +459,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                                 if let Some(host) = parsed.host_str() {
                                     if let Some(bound_id) = gemini_core::identity::get_host_binding(host) {
                                         // Auto-present bound identity
-                                        return spawn_fetch_with_identity(url, bound_id);
+                                        return spawn_fetch_with_identity(url, bound_id, cert_obs.clone());
                                     }
                                 }
                             }
@@ -494,10 +496,10 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                     if let Some(bound_id) =
                         gemini_core::identity::get_host_binding(host)
                     {
-                        return spawn_fetch_with_identity(url_str, bound_id);
+                        return spawn_fetch_with_identity(url_str, bound_id, cert_obs.clone());
                     }
                 }
-                return spawn_fetch(url_str);
+                return spawn_fetch(url_str, cert_obs.clone());
             }
         }
 
@@ -537,7 +539,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
             }
             // Retry the fetch
             app.model.active_tab_mut().content = TabContent::Loading;
-            return spawn_fetch(url.clone());
+            return spawn_fetch(url.clone(), cert_obs.clone());
         }
 
         AppMessage::DownloadStarted { filename, .. } => {
@@ -600,7 +602,7 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
                 }
             }
             app.model.active_tab_mut().content = TabContent::Loading;
-            return spawn_fetch_with_identity(url.clone(), identity_id.clone());
+            return spawn_fetch_with_identity(url.clone(), identity_id.clone(), cert_obs.clone());
         }
 
         AppMessage::CreateIdentity { name, duration_days } => {
@@ -957,7 +959,144 @@ pub fn update(app: &mut App, message: &AppMessage) -> Task<Action<AppMessage>> {
             // Re-fetch the active tab
             let url = app.model.active_tab().url.clone();
             if !url.is_empty() {
-                return spawn_fetch(url);
+                return spawn_fetch(url, cert_obs.clone());
+            }
+        }
+
+        // HYDRA protocol messages
+        AppMessage::HydraNodeStarted(handle) => {
+            if let Some(handle) = handle {
+                let tx = handle.cmd_tx.clone();
+                app.hydra_handle = Some(handle.clone());
+                // Request initial status
+                tokio::spawn(async move {
+                    let _ = tx.send(hydra_core::node::HydraCommand::GetStatus).await;
+                });
+            }
+        }
+
+        AppMessage::HydraStatusUpdate(status) => {
+            app.model.hydra_status = Some(status.clone());
+        }
+
+        AppMessage::HydraAlert(alert) => {
+            app.model.hydra_alerts.push(alert.clone());
+        }
+
+        AppMessage::HydraObservationRecorded(domain) => {
+            log::debug!("HYDRA observation recorded for: {}", domain);
+            // Request status update to refresh counts
+            if let Some(ref handle) = app.hydra_handle {
+                let tx = handle.cmd_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(hydra_core::node::HydraCommand::GetStatus).await;
+                });
+            }
+        }
+
+        AppMessage::HydraSyncComplete { peer_id, events_exchanged } => {
+            log::info!(
+                "HYDRA sync complete with peer {}: {} events exchanged",
+                &peer_id[..peer_id.len().min(8)],
+                events_exchanged
+            );
+            // Request status update
+            if let Some(ref handle) = app.hydra_handle {
+                let tx = handle.cmd_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(hydra_core::node::HydraCommand::GetStatus).await;
+                });
+            }
+        }
+
+        AppMessage::HydraError(e) => {
+            log::error!("HYDRA error: {}", e);
+        }
+
+        AppMessage::ShowHydraPanel => {
+            // Request fresh status from HYDRA node
+            if let Some(ref handle) = app.hydra_handle {
+                let tx = handle.cmd_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(hydra_core::node::HydraCommand::GetStatus).await;
+                });
+            }
+
+            let existing_address = if let TabContent::HydraPanel { new_peer_address, .. } =
+                &app.model.active_tab().content
+            {
+                new_peer_address.clone()
+            } else {
+                String::new()
+            };
+
+            app.model.active_tab_mut().content = TabContent::HydraPanel {
+                new_peer_address: existing_address,
+            };
+            app.model.active_tab_mut().title = "HYDRA Panel".to_string();
+        }
+
+        AppMessage::HydraToggleEnabled => {
+            if let Some(ref handle) = app.hydra_handle {
+                let tx = handle.cmd_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(hydra_core::node::HydraCommand::ToggleEnabled).await;
+                });
+            }
+        }
+
+        AppMessage::HydraAddPeer(address) => {
+            if let Some(ref handle) = app.hydra_handle {
+                let tx = handle.cmd_tx.clone();
+                let addr = address.clone();
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(hydra_core::node::HydraCommand::AddPeer {
+                            onion_address: addr,
+                        })
+                        .await;
+                });
+            }
+            // Clear the peer address input
+            if let TabContent::HydraPanel { new_peer_address, .. } =
+                &mut app.model.active_tab_mut().content
+            {
+                new_peer_address.clear();
+            }
+        }
+
+        AppMessage::HydraRemovePeer(node_id) => {
+            if let Some(ref handle) = app.hydra_handle {
+                let tx = handle.cmd_tx.clone();
+                let id = node_id.clone();
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(hydra_core::node::HydraCommand::RemovePeer { node_id: id })
+                        .await;
+                });
+            }
+        }
+
+        AppMessage::HydraManualSync => {
+            if let Some(ref handle) = app.hydra_handle {
+                let tx = handle.cmd_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(hydra_core::node::HydraCommand::ManualSync).await;
+                });
+            }
+        }
+
+        AppMessage::HydraDismissAlert(index) => {
+            if *index < app.model.hydra_alerts.len() {
+                app.model.hydra_alerts.remove(*index);
+            }
+        }
+
+        AppMessage::HydraPeerAddressChanged(address) => {
+            if let TabContent::HydraPanel { new_peer_address, .. } =
+                &mut app.model.active_tab_mut().content
+            {
+                *new_peer_address = address.clone();
             }
         }
 
@@ -988,10 +1127,16 @@ pub fn load_bookmarks_into_active_tab(app: &mut App) {
 }
 
 /// Spawn an async fetch task.
-fn spawn_fetch(url: String) -> Task<Action<AppMessage>> {
+fn spawn_fetch(
+    url: String,
+    cert_observer: Option<broadcast::Sender<gemini_core::TlsCertCapture>>,
+) -> Task<Action<AppMessage>> {
     let fetch_url = url.clone();
     Task::future(async move {
-        let client = gemini_core::Client::new();
+        let mut client = gemini_core::Client::new();
+        if let Some(tx) = cert_observer {
+            client = client.with_cert_observer(tx);
+        }
         match client.fetch(&fetch_url).await {
             Ok(response) => {
                 let status = response.status();
@@ -1048,7 +1193,11 @@ fn spawn_fetch(url: String) -> Task<Action<AppMessage>> {
 }
 
 /// Spawn an async fetch task with a client certificate identity.
-fn spawn_fetch_with_identity(url: String, identity_id: String) -> Task<Action<AppMessage>> {
+fn spawn_fetch_with_identity(
+    url: String,
+    identity_id: String,
+    cert_observer: Option<broadcast::Sender<gemini_core::TlsCertCapture>>,
+) -> Task<Action<AppMessage>> {
     let fetch_url = url.clone();
     Task::future(async move {
         let (certs, key) = match gemini_core::identity::load_identity(&identity_id) {
@@ -1060,7 +1209,10 @@ fn spawn_fetch_with_identity(url: String, identity_id: String) -> Task<Action<Ap
             }
         };
 
-        let client = gemini_core::Client::new();
+        let mut client = gemini_core::Client::new();
+        if let Some(tx) = cert_observer {
+            client = client.with_cert_observer(tx);
+        }
         match client.fetch_with_identity(&fetch_url, certs, key).await {
             Ok(response) => {
                 let status = response.status();
@@ -1113,7 +1265,11 @@ fn spawn_fetch_with_identity(url: String, identity_id: String) -> Task<Action<Ap
 }
 
 /// Spawn async tasks to fetch all inline images in the active tab.
-fn spawn_image_fetches(tab_index: usize, app: &App) -> Vec<Task<Action<AppMessage>>> {
+fn spawn_image_fetches(
+    tab_index: usize,
+    app: &App,
+    cert_observer: Option<broadcast::Sender<gemini_core::TlsCertCapture>>,
+) -> Vec<Task<Action<AppMessage>>> {
     let mut tasks = Vec::new();
 
     if let Some(tab) = app.model.tabs.get(tab_index) {
@@ -1123,8 +1279,9 @@ fn spawn_image_fetches(tab_index: usize, app: &App) -> Vec<Task<Action<AppMessag
                     let img_url = url.clone();
                     let ti = tab_index;
                     let bi = block_index;
+                    let obs = cert_observer.clone();
                     tasks.push(Task::future(async move {
-                        match fetch_image_bytes(&img_url).await {
+                        match fetch_image_bytes(&img_url, obs).await {
                             Ok(data) => Action::App(AppMessage::ImageLoaded {
                                 tab_index: ti,
                                 block_index: bi,
@@ -1148,8 +1305,14 @@ fn spawn_image_fetches(tab_index: usize, app: &App) -> Vec<Task<Action<AppMessag
 const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 /// Fetch image bytes from a gemini:// URL.
-async fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let client = gemini_core::Client::new();
+async fn fetch_image_bytes(
+    url: &str,
+    cert_observer: Option<broadcast::Sender<gemini_core::TlsCertCapture>>,
+) -> Result<Vec<u8>, String> {
+    let mut client = gemini_core::Client::new();
+    if let Some(tx) = cert_observer {
+        client = client.with_cert_observer(tx);
+    }
     let response = client.fetch(url).await.map_err(|e| e.to_string())?;
 
     if !matches!(response.status(), gemini_core::Status::Success(_)) {

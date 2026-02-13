@@ -10,6 +10,7 @@ pub struct AppConfig {
     pub search_engine: String,
     pub auto_load_images: bool,
     pub home_page: String,
+    pub hydra_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -20,6 +21,7 @@ impl Default for AppConfig {
             search_engine: "gemini://tlgs.one/search?%s".to_string(),
             auto_load_images: true,
             home_page: String::new(),
+            hydra_enabled: false,
         }
     }
 }

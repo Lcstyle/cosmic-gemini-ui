@@ -42,8 +42,19 @@ pub fn header_start(model: &AppModel) -> Vec<Element<'_, AppMessage>> {
     ]
 }
 
-/// Build header bar elements (right side: bookmarks, new tab, menu).
-pub fn header_end(_model: &AppModel) -> Vec<Element<'_, AppMessage>> {
+/// Build header bar elements (right side: HYDRA status, bookmarks, new tab, menu).
+pub fn header_end(model: &AppModel) -> Vec<Element<'_, AppMessage>> {
+    // HYDRA status icon: grey=off, green=active, amber=alerts
+    let hydra_icon_name = match &model.hydra_status {
+        Some(status) if status.enabled && model.hydra_alerts.is_empty() => {
+            "security-high-symbolic"
+        }
+        Some(status) if status.enabled => "security-medium-symbolic",
+        _ => "security-low-symbolic",
+    };
+    let hydra_btn = widget::button::icon(widget::icon::from_name(hydra_icon_name))
+        .on_press(AppMessage::ShowHydraPanel);
+
     let bookmark_btn =
         widget::button::icon(widget::icon::from_name("bookmark-new-symbolic"))
             .on_press(AppMessage::ToggleBookmark);
@@ -62,6 +73,7 @@ pub fn header_end(_model: &AppModel) -> Vec<Element<'_, AppMessage>> {
         widget::menu::Item::Divider,
         widget::menu::Item::Button("Bookmark Page", None, MenuActionItem::Bookmark),
         widget::menu::Item::Button("Identity Manager", None, MenuActionItem::IdentityManager),
+        widget::menu::Item::Button("HYDRA Panel", None, MenuActionItem::HydraPanel),
         widget::menu::Item::Divider,
         widget::menu::Item::Button("Focus URL Bar", None, MenuActionItem::FocusUrlBar),
     ];
@@ -75,5 +87,5 @@ pub fn header_end(_model: &AppModel) -> Vec<Element<'_, AppMessage>> {
 
     let menu_bar = widget::menu::bar(vec![menu_tree]);
 
-    vec![bookmark_btn.into(), new_tab_btn.into(), menu_bar.into()]
+    vec![hydra_btn.into(), bookmark_btn.into(), new_tab_btn.into(), menu_bar.into()]
 }

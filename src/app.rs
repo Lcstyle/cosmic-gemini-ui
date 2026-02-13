@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use cosmic::app::Core;
@@ -6,6 +7,7 @@ use cosmic::iced::keyboard::{self, key::Named, Key, Modifiers};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget::segmented_button;
 use cosmic::{widget, Action, Element, Task};
+use tokio::sync::broadcast;
 
 use crate::config::{AppConfig, APP_ID};
 use crate::menu::tab_context_menu_items;
@@ -35,6 +37,9 @@ pub struct App {
     config_handler: Option<cosmic_config::Config>,
     pub tab_model: segmented_button::SingleSelectModel,
     pub context_tab: Option<segmented_button::Entity>,
+    pub hydra_handle: Option<Arc<hydra_core::node::HydraHandle>>,
+    pub cert_observer_tx: Option<broadcast::Sender<gemini_core::TlsCertCapture>>,
+    hydra_notification_rx: Option<Arc<tokio::sync::Mutex<broadcast::Receiver<hydra_core::node::HydraNotification>>>>,
 }
 
 impl App {
@@ -78,6 +83,14 @@ impl cosmic::Application for App {
 
         let model = AppModel::new();
 
+        // Set up HYDRA cert observer channel (always created, zero-cost if unused)
+        let (cert_tx, _cert_rx) = broadcast::channel::<gemini_core::TlsCertCapture>(64);
+
+        // Set up HYDRA notification channel
+        let (_notif_tx, notif_rx) = broadcast::channel::<hydra_core::node::HydraNotification>(64);
+
+        let hydra_notification_rx = Some(Arc::new(tokio::sync::Mutex::new(notif_rx)));
+
         let mut app = Self {
             core,
             model,
@@ -85,6 +98,9 @@ impl cosmic::Application for App {
             config_handler,
             tab_model: segmented_button::SingleSelectModel::default(),
             context_tab: None,
+            hydra_handle: None,
+            cert_observer_tx: Some(cert_tx),
+            hydra_notification_rx,
         };
 
         // If a URL was passed, navigate to it; otherwise try to restore session
@@ -112,8 +128,31 @@ impl cosmic::Application for App {
             Task::none()
         };
 
+        // Spawn HYDRA node startup if enabled
+        let hydra_task = if app.config.hydra_enabled {
+            let cert_tx = app.cert_observer_tx.as_ref().unwrap().clone();
+            let bridge_rx = spawn_cert_bridge(cert_tx.subscribe());
+            let (notif_tx, notif_rx) = broadcast::channel::<hydra_core::node::HydraNotification>(64);
+            app.hydra_notification_rx = Some(Arc::new(tokio::sync::Mutex::new(notif_rx)));
+
+            Task::future(async move {
+                match hydra_core::node::HydraNode::start(bridge_rx, notif_tx).await {
+                    Ok(handle) => {
+                        log::info!("HYDRA node started successfully");
+                        Action::App(AppMessage::HydraNodeStarted(Some(Arc::new(handle))))
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start HYDRA node: {}", e);
+                        Action::App(AppMessage::HydraNodeStarted(None))
+                    }
+                }
+            })
+        } else {
+            Task::none()
+        };
+
         app.rebuild_tab_model();
-        (app, init_task)
+        (app, Task::batch([init_task, hydra_task]))
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Action<Self::Message>> {
@@ -204,6 +243,13 @@ impl cosmic::Application for App {
             TabContent::MisfinSent { recipient, status } => {
                 views::misfin_view::sent_view(recipient, status)
             }
+            TabContent::HydraPanel { new_peer_address } => {
+                views::hydra_view::view(
+                    self.model.hydra_status.as_ref(),
+                    &self.model.hydra_alerts,
+                    new_peer_address,
+                )
+            }
             TabContent::Blank => {
                 cosmic::widget::container(
                     cosmic::widget::column()
@@ -257,11 +303,53 @@ impl cosmic::Application for App {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        Subscription::batch([
+        let mut subs = vec![
             keyboard::on_key_press(handle_key_press),
             cosmic::iced::time::every(Duration::from_secs(30))
                 .map(|_| AppMessage::SaveSession),
-        ])
+        ];
+
+        // Poll HYDRA notifications
+        if self.hydra_handle.is_some() {
+            if let Some(rx) = &self.hydra_notification_rx {
+                let rx = rx.clone();
+                subs.push(
+                    cosmic::iced::time::every(Duration::from_millis(500)).map(move |_| {
+                        if let Ok(mut guard) = rx.try_lock() {
+                            match guard.try_recv() {
+                                Ok(hydra_core::node::HydraNotification::StatusUpdate(status)) => {
+                                    AppMessage::HydraStatusUpdate(status)
+                                }
+                                Ok(hydra_core::node::HydraNotification::Alert(alert)) => {
+                                    AppMessage::HydraAlert(alert)
+                                }
+                                Ok(hydra_core::node::HydraNotification::ObservationRecorded {
+                                    domain,
+                                }) => AppMessage::HydraObservationRecorded(domain),
+                                Ok(hydra_core::node::HydraNotification::SyncComplete {
+                                    peer_id,
+                                    events_exchanged,
+                                }) => AppMessage::HydraSyncComplete {
+                                    peer_id,
+                                    events_exchanged,
+                                },
+                                Ok(hydra_core::node::HydraNotification::Error(e)) => {
+                                    AppMessage::HydraError(e)
+                                }
+                                Ok(hydra_core::node::HydraNotification::Started { .. }) => {
+                                    AppMessage::NoOp
+                                }
+                                Err(_) => AppMessage::NoOp,
+                            }
+                        } else {
+                            AppMessage::NoOp
+                        }
+                    }),
+                );
+            }
+        }
+
+        Subscription::batch(subs)
     }
 
     fn on_close_requested(&self, _id: cosmic::iced::window::Id) -> Option<AppMessage> {
@@ -284,6 +372,7 @@ fn handle_key_press(key: Key, modifiers: Modifiers) -> Option<AppMessage> {
             Key::Character("r") => Some(AppMessage::Reload),
             Key::Character("d") => Some(AppMessage::ToggleBookmark),
             Key::Character("i") => Some(AppMessage::ShowIdentityManager),
+            Key::Character("h") => Some(AppMessage::ShowHydraPanel),
             _ => None,
         };
     }
@@ -320,4 +409,38 @@ fn handle_key_press(key: Key, modifiers: Modifiers) -> Option<AppMessage> {
     }
 
     None
+}
+
+/// Bridge gemini_core TLS cert captures to hydra_core RawCertCapture format.
+///
+/// Spawns a tokio task that receives `TlsCertCapture` from gemini-core and
+/// re-broadcasts them as `RawCertCapture` for the HYDRA node.
+fn spawn_cert_bridge(
+    mut gemini_rx: broadcast::Receiver<gemini_core::TlsCertCapture>,
+) -> broadcast::Receiver<hydra_core::observation::RawCertCapture> {
+    let (hydra_tx, hydra_rx) = broadcast::channel::<hydra_core::observation::RawCertCapture>(64);
+
+    tokio::spawn(async move {
+        loop {
+            match gemini_rx.recv().await {
+                Ok(capture) => {
+                    let raw = hydra_core::observation::RawCertCapture {
+                        host: capture.host,
+                        port: capture.port,
+                        certs_der: capture.certs_der,
+                        timestamp: capture.timestamp,
+                    };
+                    let _ = hydra_tx.send(raw);
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!("HYDRA cert bridge: dropped {} captures", n);
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
+        }
+    });
+
+    hydra_rx
 }
