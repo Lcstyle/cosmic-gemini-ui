@@ -228,17 +228,28 @@ impl cosmic::Application for App {
             }
         };
 
-        let tab_bar: Element<'_, Self::Message> = widget::tab_bar::horizontal(&self.tab_model)
+        let tab_bar = widget::tab_bar::horizontal(&self.tab_model)
             .on_activate(AppMessage::TabActivate)
             .on_close(AppMessage::TabClose)
             .on_context(AppMessage::TabContext)
             .context_menu(Some(tab_context_menu_items()))
             .on_middle_press(AppMessage::TabClose)
+            .width(Length::Fill);
+
+        let new_tab_btn = cosmic::widget::button::icon(
+            widget::icon::from_name("list-add-symbolic"),
+        )
+        .on_press(AppMessage::NewTab);
+
+        let tab_row: Element<'_, Self::Message> = cosmic::widget::row()
+            .push(tab_bar)
+            .push(new_tab_btn)
+            .align_y(cosmic::iced::Alignment::Center)
             .width(Length::Fill)
             .into();
 
         cosmic::widget::column()
-            .push(tab_bar)
+            .push(tab_row)
             .push(content)
             .width(Length::Fill)
             .height(Length::Fill)

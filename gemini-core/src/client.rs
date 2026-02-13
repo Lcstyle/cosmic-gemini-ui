@@ -11,6 +11,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use url::Url;
 
+use tokio::sync::broadcast;
+
 use crate::known_hosts::{self, CertificateError, KnownHostsFile};
 
 const MAX_REDIRECT: u8 = 5;
@@ -205,8 +207,20 @@ impl rustls::client::danger::ServerCertVerifier for TofuVerifier {
     }
 }
 
+/// Raw TLS certificate capture for HYDRA protocol observation.
+///
+/// Sent on the broadcast channel after each successful TLS handshake.
+#[derive(Debug, Clone)]
+pub struct TlsCertCapture {
+    pub host: String,
+    pub port: u16,
+    pub certs_der: Vec<Vec<u8>>,
+    pub timestamp: std::time::SystemTime,
+}
+
 pub struct Client {
     tls_config: Arc<rustls::ClientConfig>,
+    cert_observer: Option<broadcast::Sender<TlsCertCapture>>,
 }
 
 /// Build a rustls ClientConfig with TOFU verification and no client auth.
@@ -240,7 +254,17 @@ impl Client {
 
         Self {
             tls_config: Arc::new(build_tls_config()),
+            cert_observer: None,
         }
+    }
+
+    /// Attach a HYDRA certificate observer to this client.
+    ///
+    /// After each successful TLS handshake, the server's certificate chain
+    /// will be sent on this channel for HYDRA observation processing.
+    pub fn with_cert_observer(mut self, tx: broadcast::Sender<TlsCertCapture>) -> Self {
+        self.cert_observer = Some(tx);
+        self
     }
 
     pub async fn fetch(&self, url_str: &str) -> Result<Response, Error> {
@@ -260,7 +284,7 @@ impl Client {
 
         for i in 0..=MAX_REDIRECT {
             let url = Url::parse(&url_str)?;
-            let res = Self::fetch_internal_with_config(&url, config.clone()).await?;
+            let res = self.fetch_internal_with_config(&url, config.clone()).await?;
 
             match res.status() {
                 Status::Redirect(_) if i < MAX_REDIRECT => {
@@ -296,7 +320,7 @@ impl Client {
 
         for i in 0..=max_redirect {
             let url = Url::parse(&url_str)?;
-            let res = Self::fetch_internal_with_config(&url, self.tls_config.clone()).await?;
+            let res = self.fetch_internal_with_config(&url, self.tls_config.clone()).await?;
 
             match res.status() {
                 Status::Redirect(_) if i < max_redirect => {
@@ -325,6 +349,7 @@ impl Client {
     }
 
     async fn fetch_internal_with_config(
+        &self,
         url: &Url,
         tls_config: Arc<rustls::ClientConfig>,
     ) -> Result<Response, Error> {
@@ -368,6 +393,17 @@ impl Client {
                             KnownHostsFile::new(temp)
                         });
                     known_hosts::validate(&mut known_hosts, &host, cert.as_ref())?;
+                }
+
+                // Send certificate capture to HYDRA observer (if attached)
+                if let Some(ref observer) = self.cert_observer {
+                    let capture = TlsCertCapture {
+                        host: host.clone(),
+                        port,
+                        certs_der: certs.iter().map(|c| c.as_ref().to_vec()).collect(),
+                        timestamp: std::time::SystemTime::now(),
+                    };
+                    let _ = observer.send(capture);
                 }
             }
         }

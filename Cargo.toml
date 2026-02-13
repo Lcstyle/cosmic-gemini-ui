@@ -1,5 +1,5 @@
 [workspace]
-members = ["gemini-core"]
+members = ["gemini-core", "hydra-core"]
 
 [package]
 name = "cosmic-gemini"
@@ -8,6 +8,7 @@ edition = "2021"
 
 [dependencies]
 gemini-core = { path = "gemini-core" }
+hydra-core = { path = "hydra-core" }
 libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
     "a11y", "about", "tokio", "winit", "wayland", "wgpu",
 ] }
